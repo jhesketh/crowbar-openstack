@@ -90,15 +90,20 @@ template "/etc/my.cnf.d/logging.cnf" do
 end
 
 if node[:database][:ha][:enabled]
-  template "/etc/my.cnf.d/galera.cnf" do
-    source "galera.cnf.erb"
-    owner "root"
-    group "mysql"
-    mode "0640"
-    variables(
-      cluster_addresses: cluster_addresses
-    )
-    notifies :restart, "service[mysql]", :immediately
+  unless node[:database][:galera_bootstrapped]
+    # For bootstrapping sst, use root with no password
+    template "/etc/my.cnf.d/galera.cnf" do
+      source "galera.cnf.erb"
+      owner "root"
+      group "mysql"
+      mode "0640"
+      variables(
+        cluster_addresses: cluster_addresses,
+        sstuser: "root",
+        sstuser_password: ""
+      )
+      notifies :restart, "service[mysql]", :immediately
+    end
   end
 end
 
@@ -193,6 +198,49 @@ unless node[:database][:database_bootstrapped]
     provider db_settings[:user_provider]
     action :drop
     only_if { !ha_enabled || CrowbarPacemakerHelper.is_cluster_founder?(node) }
+  end
+
+  if node[:database][:ha][:enabled]
+    database_user "create state snapshot transfer user" do
+      connection db_connection
+      username "sstuser"
+      password node[:database][:mysql][:sstuser_password]
+      host "localhost"
+      provider db_settings[:user_provider]
+      action :create
+      only_if { ha_enabled && CrowbarPacemakerHelper.is_cluster_founder?(node) }
+    end
+
+    database_user "grant sstuser root privileges" do
+      connection db_connection
+      username "sstuser"
+      password node[:database][:mysql][:sstuser_password]
+      host "localhost"
+      provider db_settings[:user_provider]
+      action :grant
+      only_if { ha_enabled && CrowbarPacemakerHelper.is_cluster_founder?(node) }
+    end
+  end
+end
+
+if node[:database][:ha][:enabled]
+  # Ensure we are syncronised so that the sstuser is on the node
+  crowbar_pacemaker_sync_mark "sync-database_before_cnf_update" do
+    revision node[:database]["crowbar-revision"]
+  end
+
+  # Update galera.cnf with new user details
+  template "/etc/my.cnf.d/galera.cnf" do
+    source "galera.cnf.erb"
+    owner "root"
+    group "mysql"
+    mode "0640"
+    variables(
+      cluster_addresses: cluster_addresses,
+      sstuser: "sstuser",
+      sstuser_password: node[:database][:mysql][:sstuser_password]
+    )
+    notifies :restart, "service[mysql]", :immediately
   end
 end
 
