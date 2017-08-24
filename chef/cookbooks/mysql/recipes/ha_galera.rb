@@ -54,11 +54,87 @@ service_name = "galera"
 cluster_nodes = CrowbarPacemakerHelper.cluster_nodes(node)
 nodes_names = cluster_nodes.map { |n| n[:hostname] }
 
+unless node[:database][:galera_bootstrapped]
+  if CrowbarPacemakerHelper.is_cluster_founder?(node)
+    # To bootstrap for the first time, start galera on one node
+    # to set up the seed sst user.
+
+    template "/etc/my.cnf.d/galera.cnf" do
+      source "galera.cnf.erb"
+      owner "root"
+      group "mysql"
+      mode "0640"
+      variables(
+        cluster_addresses: "gcomm://",
+        sstuser: "root",
+        sstuser_password: ""
+      )
+    end
+
+    case node[:platform_family]
+    when "rhel", "fedora"
+      mysql_service_name = "mysqld"
+    else
+      mysql_service_name = "mysql"
+    end
+
+    db_settings = fetch_database_settings
+    db_connection = db_settings[:connection].dup
+    db_connection[:host] = "localhost"
+    db_connection[:username] = "root"
+    db_connection[:password] = ""
+
+    service "mysql-temp" do
+      service_name mysql_service_name
+      supports status: true, restart: true, reload: true
+      action :start
+    end
+
+    database_user "create state snapshot transfer user" do
+      connection db_connection
+      username "sstuser"
+      password node[:database][:mysql][:sstuser_password]
+      host "localhost"
+      provider db_settings[:user_provider]
+      action :create
+    end
+
+    database_user "grant sstuser root privileges" do
+      connection db_connection
+      username "sstuser"
+      password node[:database][:mysql][:sstuser_password]
+      host "localhost"
+      provider db_settings[:user_provider]
+      action :grant
+    end
+
+    service "mysql-temp" do
+      service_name mysql_service_name
+      supports status: true, restart: true, reload: true
+      action :stop
+    end
+  end
+end
+
+cluster_addresses = "gcomm://" + nodes_names.join(",")
+
+template "/etc/my.cnf.d/galera.cnf" do
+  source "galera.cnf.erb"
+  owner "root"
+  group "mysql"
+  mode "0640"
+  variables(
+    cluster_addresses: cluster_addresses,
+    sstuser: "sstuser",
+    sstuser_password: node[:database][:mysql][:sstuser_password]
+  )
+end
+
 pacemaker_primitive service_name do
   agent resource_agent
   params({
     "enable_creation" => true,
-    "wsrep_cluster_address" => "gcomm://" + nodes_names.join(","),
+    "wsrep_cluster_address" => cluster_addresses,
     "check_user" => "monitoring",
     "socket" => "/var/run/mysql/mysql.sock"
   })
