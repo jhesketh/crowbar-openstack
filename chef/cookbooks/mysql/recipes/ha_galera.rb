@@ -116,6 +116,11 @@ unless node[:database][:galera_bootstrapped]
   end
 end
 
+# all nodes should wait until the founder has set up the sstuer
+crowbar_pacemaker_sync_mark "wait-database_sstuser_setup" do
+  revision node[:database]["crowbar-revision"]
+end
+
 cluster_addresses = "gcomm://" + nodes_names.join(",")
 
 template "/etc/my.cnf.d/galera.cnf" do
